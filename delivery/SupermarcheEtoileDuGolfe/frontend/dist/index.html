@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <link rel="icon" type="image/png" href="/image.png" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#1a3c5e" />
+  <title>Supermarché étoile du golfe</title>
+  <script type="module" crossorigin src="/assets/index-CistrrNY.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-BL-bkGE7.css">
+<link rel="manifest" href="/manifest.webmanifest"></head>
+<body>
+  <div id="root"></div>
+  <script>
+    (() => {
+      const clearServiceWorkerAndCaches = async () => {
+        try {
+          if ('serviceWorker' in navigator) {
+            const registrations = await navigator.serviceWorker.getRegistrations();
+            await Promise.all(registrations.map((registration) => registration.unregister()));
+          }
+          if ('caches' in window) {
+            const keys = await caches.keys();
+            await Promise.all(keys.map((key) => caches.delete(key)));
+          }
+        } catch (error) {
+          console.warn('SW cleanup failed', error);
+        }
+      };
+      clearServiceWorkerAndCaches();
+
+      const isBarcodeModal = (node) => {
+        if (!node || typeof node.textContent !== 'string') {
+          return false;
+        }
+        const text = node.textContent;
+        return /code\s*-?\s*barres?/i.test(text) || /ean\s*[- ]?13/i.test(text);
+      };
+      const isPrintLabelAction = (text) => /^(telecharger\s*pdf|télécharger\s*pdf|imprimer|print)$/i.test((text || '').trim());
+      const extractBarcodeValue = (modal) => {
+        const exact = modal.querySelector('.font-mono.font-bold.text-lg.tracking-widest');
+        const fromExact = ((exact || {}).textContent || '').trim();
+        if (fromExact) {
+          return fromExact;
+        }
+        const candidates = Array.from(modal.querySelectorAll('p,span,div,strong,code'));
+        for (const candidate of candidates) {
+          const value = (candidate.textContent || '').trim();
+          if (/^\d{8,14}$/.test(value)) {
+            return value;
+          }
+        }
+        return '';
+      };
+      const extractPriceValue = (modal) => {
+        const direct = getText(modal, '.text-xs.text-gray-400.mt-3');
+        const fromDirect = Number(String(direct).replace(/[^0-9]/g, '')) || 0;
+        if (fromDirect > 0) {
+          return fromDirect;
+        }
+        const candidates = Array.from(modal.querySelectorAll('p,span,div,strong'));
+        for (const candidate of candidates) {
+          const value = (candidate.textContent || '').trim();
+          if (!/fcfa/i.test(value)) {
+            continue;
+          }
+          const parsed = Number(value.replace(/[^0-9]/g, '')) || 0;
+          if (parsed > 0) {
+            return parsed;
+          }
+        }
+        return 0;
+      };
+      const resolvePrintScope = (button) => {
+        const modal = button ? button.closest('div.fixed') : null;
+        if (modal) {
+          return modal;
+        }
+        const wrappers = Array.from(document.querySelectorAll('div[role="dialog"], div.fixed, section, main'));
+        for (const wrapper of wrappers) {
+          if (wrapper.querySelector('img[alt*="Code" i], img[alt*="barre" i], img[src^="data:image/"]')) {
+            return wrapper;
+          }
+        }
+        return document;
+      };
+      const normalizeSearch = (value) => String(value || '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .trim();
+      const scoreMatch = (haystack, query) => {
+        const h = normalizeSearch(haystack);
+        const q = normalizeSearch(query);
+        if (!q) return 999;
+        if (h === q) return 0;
+        if (h.startsWith(q)) return 1;
+        if (h.includes(q)) return 2;
+        return 999;
+      };
+      const patchReapproSearch = () => {
+        document.querySelectorAll('.card').forEach((card) => {
+          const heading = card.querySelector('h2');
+          if (!heading || !heading.textContent || !heading.textContent.includes('Réapprovisionnement')) {
+            return;
+          }
+          const articleLabel = Array.from(card.querySelectorAll('label')).find((label) => {
+            const text = (label.textContent || '').trim();
+            return text.startsWith('Article');
+          });
+          const articleBlock = articleLabel ? articleLabel.parentElement : null;
+          const articleSelect = articleBlock ? articleBlock.querySelector('select.input') : null;
+          if (!articleBlock || !articleSelect) {
+            return;
+          }
+          if (articleBlock.querySelector('[data-reappro-search="1"]')) {
+            return;
+          }
+
+          const wrapper = document.createElement('div');
+          wrapper.dataset.reapproSearch = '1';
+          wrapper.className = 'mb-2';
+
+          const input = document.createElement('input');
+          input.type = 'text';
+          input.className = 'input text-sm';
+          input.placeholder = 'Recherche dictionnaire (nom, code-barres)';
+
+          const results = document.createElement('div');
+          results.className = 'mt-1 border border-gray-200 rounded-md bg-white max-h-44 overflow-auto hidden';
+
+          let timer = null;
+          const hideResults = () => {
+            results.classList.add('hidden');
+            results.innerHTML = '';
+          };
+
+          const setSelectedArticle = (id) => {
+            const targetValue = String(id);
+            const option = Array.from(articleSelect.options).find((opt) => opt.value === targetValue);
+            if (!option) {
+              return false;
+            }
+            articleSelect.value = targetValue;
+            articleSelect.dispatchEvent(new Event('input', { bubbles: true }));
+            articleSelect.dispatchEvent(new Event('change', { bubbles: true }));
+            return true;
+          };
+
+          const renderResults = (items) => {
+            results.innerHTML = '';
+            if (!items.length) {
+              hideResults();
+              return;
+            }
+            items.forEach((item) => {
+              const button = document.createElement('button');
+              button.type = 'button';
+              button.className = 'w-full text-left px-3 py-2 text-sm hover:bg-gray-50 border-b border-gray-100 last:border-b-0';
+              const stock = item.stockActuel ?? item.stock_actuel ?? '';
+              const code = item.codeBarre || item.code_barre || '';
+              button.textContent = `${item.nom} ${code ? '• ' + code : ''} ${stock !== '' ? '(stock: ' + stock + ')' : ''}`.trim();
+              const pick = () => {
+                const ok = setSelectedArticle(item.id);
+                if (!ok) {
+                  return;
+                }
+                input.value = item.nom || '';
+                hideResults();
+              };
+              button.addEventListener('mousedown', (event) => {
+                event.preventDefault();
+                pick();
+              });
+              button.addEventListener('click', (event) => {
+                event.preventDefault();
+                pick();
+              });
+              results.appendChild(button);
+            });
+            results.classList.remove('hidden');
+          };
+
+          const searchLocal = (query) => {
+            const q = normalizeSearch(query);
+            if (!q) {
+              return [];
+            }
+            const options = Array.from(articleSelect.options)
+              .filter((opt) => opt.value)
+              .map((opt) => ({
+                id: Number(opt.value),
+                nom: (opt.textContent || '').replace(/\s*\(stock:.*\)\s*$/i, '').trim(),
+                score: scoreMatch(opt.textContent || '', q),
+              }))
+              .filter((item) => item.score < 999)
+              .sort((a, b) => a.score - b.score)
+              .slice(0, 8);
+            return options;
+          };
+
+          const doSearch = async () => {
+            const query = input.value.trim();
+            if (query.length < 1) {
+              hideResults();
+              return;
+            }
+
+            const localItems = searchLocal(query);
+            const token = localStorage.getItem('shopdesk_token');
+            try {
+              const response = await fetch(`/api/articles?search=${encodeURIComponent(query)}`, {
+                headers: {
+                  ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                },
+              });
+              if (!response.ok) {
+                renderResults(localItems);
+                return;
+              }
+              const rows = await response.json();
+              const merged = [];
+              const seen = new Set();
+              (Array.isArray(rows) ? rows : []).forEach((row) => {
+                const id = Number(row.id);
+                if (!id || seen.has(id)) {
+                  return;
+                }
+                seen.add(id);
+                merged.push(row);
+              });
+              localItems.forEach((item) => {
+                if (!seen.has(item.id)) {
+                  seen.add(item.id);
+                  merged.push(item);
+                }
+              });
+              renderResults(merged.slice(0, 8));
+            } catch (_error) {
+              renderResults(localItems);
+            }
+          };
+
+          input.addEventListener('input', () => {
+            if (timer) {
+              clearTimeout(timer);
+            }
+            timer = setTimeout(doSearch, 180);
+          });
+          input.addEventListener('blur', () => {
+            setTimeout(hideResults, 160);
+          });
+          input.addEventListener('focus', () => {
+            if (input.value.trim()) {
+              doSearch();
+            }
+          });
+
+          wrapper.appendChild(input);
+          wrapper.appendChild(results);
+          articleBlock.insertBefore(wrapper, articleSelect);
+        });
+      };
+      const patchButtons = () => {
+        patchReapproSearch();
+        document.querySelectorAll('button').forEach((button) => {
+          if (button.dataset.barcodePrintPatched === '1') {
+            return;
+          }
+          const text = (button.textContent || '').trim();
+          if (!isPrintLabelAction(text)) {
+            return;
+          }
+          button.dataset.barcodePrintPatched = '1';
+          button.textContent = 'Imprimer';
+        });
+        document.querySelectorAll('div.fixed').forEach((modal) => {
+          if (!isBarcodeModal(modal)) {
+            return;
+          }
+          const injected = modal.querySelector('[data-barcode-direct-button="1"]');
+          if (injected) {
+            injected.remove();
+          }
+        });
+        document.querySelectorAll('label, p').forEach((node) => {
+          if (typeof node.textContent !== 'string') {
+            return;
+          }
+          if (node.textContent.includes('50 x 30 mm')) {
+            node.textContent = node.textContent.replace(/50 x 30 mm/g, '50 x 25 mm');
+          }
+          if (node.textContent.includes('Télécharger PDF')) {
+            node.textContent = node.textContent.replace(/Télécharger PDF/g, 'Imprimer');
+          }
+          if (node.textContent.includes('Un PDF sera généré au format exact 50 x 30 mm.')) {
+            node.textContent = 'Impression directe sur l\'imprimante connectée. Format 50 x 25 mm.';
+          }
+        });
+      };
+      const getText = (modal, selector) => ((modal.querySelector(selector) || {}).textContent || '').trim();
+      const printBarcode = async (event) => {
+        const button = event.target instanceof Element ? event.target.closest('button') : null;
+        if (!button) {
+          return;
+        }
+        const modal = button.closest('div.fixed');
+        const label = (button.textContent || '').trim();
+        if (!isPrintLabelAction(label)) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        if (typeof event.stopImmediatePropagation === 'function') {
+          event.stopImmediatePropagation();
+        }
+        const scope = resolvePrintScope(button);
+        if (scope.dataset && scope.dataset.barcodePrintInFlight === '1') {
+          return;
+        }
+        if (scope.dataset) {
+          scope.dataset.barcodePrintInFlight = '1';
+        }
+        button.disabled = true;
+        const qtyInput = scope.querySelector('input[type="number"]');
+        const qty = Math.max(1, Math.min(500, parseInt((qtyInput && qtyInput.value) || '1', 10) || 1));
+        const image = scope.querySelector('img[alt*="Code" i], img[alt*="barre" i], img[src^="data:image/"]');
+        const articleName = getText(scope, '.text-sm.font-medium.text-primary') || 'Article';
+        const codeBarre = extractBarcodeValue(scope);
+        const prixVente = extractPriceValue(scope);
+        if (!image || !image.src) {
+          alert('Image code-barres introuvable dans la fenetre actuelle.');
+          button.disabled = false;
+          if (scope.dataset) {
+            delete scope.dataset.barcodePrintInFlight;
+          }
+          return;
+        }
+        try {
+          const token = localStorage.getItem('shopdesk_token');
+          const payload = {
+            article: {
+              nom: articleName,
+              codeBarre,
+              prixVente,
+            },
+            barcodeImage: image.src,
+            qty,
+          };
+          const endpoints = ['/api/articles/print-labels', '/articles/print-labels'];
+          let lastError = null;
+          let printed = false;
+          for (const endpoint of endpoints) {
+            try {
+              const response = await fetch(endpoint, {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                  'Content-Type': 'application/json',
+                  ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                },
+                body: JSON.stringify(payload),
+              });
+              if (!response.ok) {
+                const data = await response.json().catch(() => ({}));
+                lastError = new Error(data.error || `print_failed_${response.status}`);
+                continue;
+              }
+              printed = true;
+              break;
+            } catch (requestError) {
+              lastError = requestError;
+            }
+          }
+          if (!printed) {
+            throw lastError || new Error('print_failed');
+          }
+        } catch (error) {
+          console.error('Direct barcode print failed', error);
+          alert('Impression directe indisponible: ' + (error && error.message ? error.message : 'Erreur inconnue'));
+        } finally {
+          setTimeout(() => {
+            if (button.isConnected) {
+              button.disabled = false;
+            }
+            if (scope && scope.dataset) {
+              delete scope.dataset.barcodePrintInFlight;
+            }
+          }, 600);
+        }
+      };
+      document.addEventListener('click', printBarcode, true);
+      new MutationObserver(patchButtons).observe(document.documentElement, { childList: true, subtree: true });
+      patchButtons();
+    })();
+  </script>
+</body>
+</html>

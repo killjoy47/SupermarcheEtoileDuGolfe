@@ -1,0 +1,17 @@
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Node dependencies
+**/node_modules/
+
+# Runtime data
+*.log
+data.db
+data.db-shm
+data.db-wal
+
+# Build and temp
+*.tmp
+*.temp
